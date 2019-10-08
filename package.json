@@ -1,0 +1,38 @@
+{
+  "name": "firebeats-data-fetcher",
+  "version": "1.0.0",
+  "description": "firebeats data fetcher module for all fitness data vendors",
+  "main": "server.js",
+  "scripts": {
+    "start": "rm -rf ./hmr && webpack --config webpack.dev.config.js",
+    "build": "rm -rf ./hmr && rm -rf ./prod && node_modules/.bin/webpack --config webpack.prod.config.js",
+    "lint": "eslint '**/*.js' --fix",
+    "deploy": "./deploy.sh"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@babel/runtime": "^7.6.2",
+    "axios": "^0.19.0",
+    "body-parser": "^1.19.0",
+    "core-js": "^3.2.1",
+    "gunzip-file": "^0.1.1",
+    "lodash": "^4.17.15"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.6.2",
+    "@babel/plugin-syntax-dynamic-import": "^7.2.0",
+    "@babel/plugin-transform-runtime": "^7.6.2",
+    "@babel/preset-env": "^7.6.2",
+    "@babel/register": "^7.6.2",
+    "babel-loader": "^8.0.6",
+    "dotenv-webpack": "^1.7.0",
+    "eslint": "^6.5.1",
+    "eslint-config-airbnb-base": "^14.0.0",
+    "eslint-plugin-import": "^2.18.2",
+    "nodemon-webpack-plugin": "^4.1.1",
+    "webpack": "^4.41.0",
+    "webpack-cli": "^3.3.9",
+    "webpack-node-externals": "^1.7.2"
+  }
+}
