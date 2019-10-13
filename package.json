@@ -16,11 +16,15 @@
     "axios": "^0.19.0",
     "body-parser": "^1.19.0",
     "core-js": "^3.2.1",
+    "fs-extra": "^8.1.0",
     "gunzip-file": "^0.1.1",
-    "lodash": "^4.17.15"
+    "languagedetect": "^1.2.0",
+    "lodash": "^4.17.15",
+    "node-warc": "^3.3.1"
   },
   "devDependencies": {
-    "@babel/core": "^7.6.2",
+    "@babel/core": "^7.6.4",
+    "@babel/node": "^7.6.3",
     "@babel/plugin-syntax-dynamic-import": "^7.2.0",
     "@babel/plugin-transform-runtime": "^7.6.2",
     "@babel/preset-env": "^7.6.2",

@@ -6,6 +6,9 @@ prod
 .dev.env
 .prod.env
 
-WETs_Files
+WET_Files
+temp
+
+.vscode
 
 .DS_Store
