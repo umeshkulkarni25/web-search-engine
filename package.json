@@ -20,7 +20,8 @@
     "gunzip-file": "^0.1.1",
     "languagedetect": "^1.2.0",
     "lodash": "^4.17.15",
-    "node-warc": "^3.3.1"
+    "node-warc": "^3.3.1",
+    "object-sizeof": "^1.5.2"
   },
   "devDependencies": {
     "@babel/core": "^7.6.4",

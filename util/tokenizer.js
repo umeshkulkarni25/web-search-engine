@@ -3,12 +3,23 @@ import _ from 'lodash';
 import nodeWARC from 'node-warc';
 import path from 'path';
 import fsExtra from 'fs-extra';
+import { exec } from 'child_process';
 
-const { WET_FILES_FOLDER, TEMP_FILES_FOLDER } = process.env;
+const sizeof = require('object-sizeof');
+
+const {
+  WET_FILES_FOLDER, TEMP_FILES_FOLDER, PAGE_TABLE, WET_FILES_COUNT,
+} = process.env;
 const lexicon = {};
 let termIdCounter = 0;
 const tempFilePath = path.join(process.cwd(), TEMP_FILES_FOLDER);
+const pageTablePath = path.join(process.cwd(), PAGE_TABLE);
+const pageTable = fs.createWriteStream(pageTablePath);
 let docIdCounter = 0;
+let fetchComplete = null;
+let fetchError = null;
+let buffer = null;
+
 const vetWord = (word) => {
   const results = word.match(/^[a-zA-Z]*$/);
   if (!results) {
@@ -30,46 +41,59 @@ const vetWord = (word) => {
   return termId;
 };
 
-const parseFile = (files, index, offset) => {
-  const file = files[index];
-
-  if (!file) {
-    console.log('endTime', new Date());
-    return;
-  }
-  console.log('starting warc file', offset + index);
-  const buffer = fs.createWriteStream(path.join(tempFilePath, (offset + index).toString()));
-  buffer.cork();
+const parseFile = (file, index, batch) => new Promise((resolve, reject) => {
+  console.log('starting warc file', batch * WET_FILES_COUNT + index);
   const WARCParser = new nodeWARC.AutoWARCParser(file);
   WARCParser.on('record', (record) => {
+    const { warcHeader } = record;
+    if (warcHeader['WARC-Type'] !== 'conversion') {
+      return;
+    }
     const content = record.content.toString();
-    const words = content.trim().split(/\s+/);
-    const vettedWords = _.filter(_.map(words, vetWord), Boolean);
-    const wordSet = [...(new Set(vettedWords))];
+    const terms = content.trim().split(/\s+/);
+    const vettedTerms = _.filter(_.map(terms, vetWord), Boolean);
+    const termSet = [...(new Set(vettedTerms))];
     const frequency = {};
-    _.each(wordSet, (word) => { frequency[word] = 0; });
-    _.each(vettedWords, (word) => { frequency[word] += 1; });
-    const postings = [];
-    _.each(wordSet, (word) => {
-      postings.push(`${word} ${docIdCounter} ${frequency[word]}\n`);
+    _.each(termSet, (word) => { frequency[word] = 0; });
+    _.each(vettedTerms, (word) => { frequency[word] += 1; });
+    _.each(termSet, (term) => {
+      const termBuffer = Buffer.allocUnsafe(4);
+      termBuffer.writeUInt32BE(term);
+      const docIdBuffer = Buffer.allocUnsafe(4);
+      docIdBuffer.writeUInt32BE(docIdCounter);
+      const freqBuffer = Buffer.allocUnsafe(2);
+      freqBuffer.writeUInt16BE(frequency[term]);
+      buffer.write(Buffer.concat([termBuffer, docIdBuffer, freqBuffer]));
     });
-    buffer.write(postings.join(''));
+    pageTable.write(`${docIdCounter} ${warcHeader['WARC-Target-URI']}\n`);
     docIdCounter += 1;
   });
   WARCParser.on('done', () => {
-    console.log('done with a warcfile:', offset + index, 'time:', new Date());
-    console.log('total-docs:', docIdCounter);
-    console.log('lexicon-size:', Object.keys(lexicon).length);
+    console.log('done with a warcfile:', index, 'time:', new Date());
     process.nextTick(() => {
       buffer.uncork();
-      buffer.end();
+      buffer.cork();
     });
-    parseFile(files, index + 1, offset);
+    process.nextTick(() => {
+      pageTable.uncork();
+      pageTable.cork();
+    });
+    resolve(WARCParser);
   });
   WARCParser.start();
-};
+});
 
-const parse = () => {
+const parseFilesRec = (files, index, batch) => {
+  const file = files[index];
+  if (!file) {
+    fetchComplete(lexicon);
+  }
+  parseFile(file, index, batch).then((WARCParser) => {
+    WARCParser = null;
+    parseFilesRec(files, index + 1, batch);
+  });
+};
+const tokenize = async (batch) => {
   fs.readdir(WET_FILES_FOLDER, (dirReadErr, fileNames) => {
     if (dirReadErr) {
       console.log(dirReadErr);
@@ -77,10 +101,15 @@ const parse = () => {
     }
     console.log('startTime', new Date());
     const filePaths = _.map(fileNames, (fileName) => path.join(WET_FILES_FOLDER, fileName));
-    fsExtra.removeSync(tempFilePath);
-    fsExtra.mkdirSync(tempFilePath);
-    parseFile(filePaths, 0, 0);
+    buffer = fs.createWriteStream(path.join(tempFilePath, `batch_${batch.toString()}`));
+    buffer.cork();
+    pageTable.cork();
+    parseFilesRec(filePaths, 0, batch);
+  });
+  return new Promise((resolve, reject) => {
+    fetchComplete = resolve;
+    fetchError = reject;
   });
 };
 
-export default { parse };
+export default { tokenize };
