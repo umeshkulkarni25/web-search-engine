@@ -15,4 +15,8 @@ temp
 
 batch_0
 page_table
+lexicon
+wordToPointer
+index
+tester.js
 

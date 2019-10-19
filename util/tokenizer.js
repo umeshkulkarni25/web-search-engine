@@ -8,18 +8,18 @@ import { exec } from 'child_process';
 const sizeof = require('object-sizeof');
 
 const {
-  WET_FILES_FOLDER, TEMP_FILES_FOLDER, PAGE_TABLE, WET_FILES_COUNT,
+  WET_FILES_FOLDER, TEMP_FILES_FOLDER, PAGE_TABLE, WET_FILES_PER_BATCH,
 } = process.env;
+const batchSize = parseInt(WET_FILES_PER_BATCH, 10);
 const lexicon = {};
 let termIdCounter = 0;
 const tempFilePath = path.join(process.cwd(), TEMP_FILES_FOLDER);
 const pageTablePath = path.join(process.cwd(), PAGE_TABLE);
-const pageTable = fs.createWriteStream(pageTablePath);
 let docIdCounter = 0;
 let fetchComplete = null;
 let fetchError = null;
 let buffer = null;
-
+let pageTable = null;
 const vetWord = (word) => {
   const results = word.match(/^[a-zA-Z]*$/);
   if (!results) {
@@ -42,7 +42,7 @@ const vetWord = (word) => {
 };
 
 const parseFile = (file, index, batch) => new Promise((resolve, reject) => {
-  console.log('starting warc file', batch * WET_FILES_COUNT + index);
+  console.log('starting warc file', batch * batchSize + index, 'time:', new Date());
   const WARCParser = new nodeWARC.AutoWARCParser(file);
   WARCParser.on('record', (record) => {
     const { warcHeader } = record;
@@ -69,7 +69,7 @@ const parseFile = (file, index, batch) => new Promise((resolve, reject) => {
     docIdCounter += 1;
   });
   WARCParser.on('done', () => {
-    console.log('done with a warcfile:', index, 'time:', new Date());
+    console.log('done with a warcfile:', batch * batchSize + index, 'time:', new Date());
     process.nextTick(() => {
       buffer.uncork();
       buffer.cork();
@@ -86,7 +86,12 @@ const parseFile = (file, index, batch) => new Promise((resolve, reject) => {
 const parseFilesRec = (files, index, batch) => {
   const file = files[index];
   if (!file) {
+    buffer.end();
+    pageTable.end();
+    buffer = null;
+    pageTable = null;
     fetchComplete(lexicon);
+    return;
   }
   parseFile(file, index, batch).then((WARCParser) => {
     WARCParser = null;
@@ -101,6 +106,7 @@ const tokenize = async (batch) => {
     }
     console.log('startTime', new Date());
     const filePaths = _.map(fileNames, (fileName) => path.join(WET_FILES_FOLDER, fileName));
+    pageTable = fs.createWriteStream(pageTablePath, { flags: 'a+' });
     buffer = fs.createWriteStream(path.join(tempFilePath, `batch_${batch.toString()}`));
     buffer.cork();
     pageTable.cork();
