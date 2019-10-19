@@ -5,73 +5,89 @@ import fs from 'fs';
 import fsExtra from 'fs-extra';
 import path from 'path';
 
-
-let fetchComplete = null;
-let fetchError = null;
-const workerLimit = 5;
-let workers = 5;
+const workerLimit = 5; // total workers allowed for simultaneous downloadings
+let workers = 5; // number of current workers
 const {
   WET_PATH_URL, WET_PATH_PREFIX, WET_FILES_FOLDER, WET_FILES_PER_BATCH,
 } = process.env;
 const WETDirPath = path.join(process.cwd(), WET_FILES_FOLDER);
-
-const fetch = (WETUrls, index, batch) => {
+/**
+ *
+ * @param {Array} WETUrls: array of all WET_urls fetched from common crawl
+ * @param {Number} index: index of WET_File to be fetched
+ * @param {Number} batch: Number indicating current batch
+ */
+const fetch = (WETUrls, index, batch, resolve, reject) => {
+  // check if all the files are downloaded for a given worker
   if (index >= (batch + 1) * WET_FILES_PER_BATCH) {
     workers -= 1;
     if (workers <= 0) {
       console.log('fetch complete');
-      fetchComplete(fs.readdirSync(WETDirPath));
+      resolve(fs.readdirSync(WETDirPath));
     }
     return;
   }
+  // fetch and pipe the response to disk
   const WETUrl = WETUrls[index];
-  if (WETUrl === WET_PATH_PREFIX) {
-    fetch(WETUrls, index + 1);
-  }
   axios({ url: WETUrl, responseType: 'stream' })
     .then((response) => {
       const compressedFileName = WETUrl.split('/').pop();
       response.data
         .pipe(fs.createWriteStream(path.join(WETDirPath, compressedFileName)))
-        .on('finish', () => { fetch(WETUrls, index + workerLimit, batch); });
+        .on('finish', () => {
+          // on finish, call next fetch on next file for the given worker
+          fetch(WETUrls, index + workerLimit, batch, resolve, reject);
+        });
     })
     .catch((err) => {
-      fetchError(err);
+      reject(err);
     });
 };
 
-const fetchWETFiles = async (batch) => {
+/**
+ *
+ * @param {Number} batch: indicates what batch the code is downloading.
+ * @returns {Promise}: to indicate all files in this batch are downloaded.
+ * @description: this function fetches the WET files descriptor then collects the correct paths
+ *  based on what batch we are in and the downloads 5 files simultaneously.
+ *  Uncompressing for wet.paths.gz is done using pipes on the fly.
+ *  The actual WET files are stored in compressed format on the disk.
+ */
+const fetchWETFiles = (batch) => new Promise((resolve, reject) => {
   let WETPaths = '';
-  const { data } = await axios({ url: WET_PATH_URL, responseType: 'stream' });
-  data
-    .pipe(zlib.createGunzip())
-    .pipe(new Transform({
-      objectMode: true,
-      transform: (chunk, encoding, done) => {
-        WETPaths += chunk.toString();
-        done();
-      },
-      flush: () => {
-        console.log('starting to fetch WARC files');
-        console.log('target:', WET_FILES_PER_BATCH);
-        console.log('destination', WETDirPath);
-        fsExtra.removeSync(WETDirPath);
-        fsExtra.mkdirSync(WETDirPath);
-        workers = 5;
-        const WETUrls = WETPaths.split('\n').map((directortPath) => `${WET_PATH_PREFIX}${directortPath}`);
-        fetch(WETUrls, batch * WET_FILES_PER_BATCH + 0, batch);
-        fetch(WETUrls, batch * WET_FILES_PER_BATCH + 1, batch);
-        fetch(WETUrls, batch * WET_FILES_PER_BATCH + 2, batch);
-        fetch(WETUrls, batch * WET_FILES_PER_BATCH + 3, batch);
-        fetch(WETUrls, batch * WET_FILES_PER_BATCH + 4, batch);
-      },
-    }));
-
-  return new Promise((resolve, reject) => {
-    fetchComplete = resolve;
-    fetchError = reject;
+  axios({ url: WET_PATH_URL, responseType: 'stream' }).then((response) => {
+    response.data
+      .pipe(zlib.createGunzip()) // pipe response into an unzipping stream
+      .pipe(new Transform({ // transform stram to collect the paths
+        objectMode: true,
+        transform: (chunk, encoding, done) => {
+          WETPaths += chunk.toString();
+          done();
+        },
+        flush: () => {
+          console.log('starting to fetch WARC files');
+          console.log('target:', WET_FILES_PER_BATCH);
+          console.log('destination', WETDirPath);
+          /**
+         * clear WET files directory from previous batch this helps us go through
+         *  hundreds of WET files without overrunning the hard-disk space
+         * */
+          if (fs.existsSync(WETDirPath)) {
+            fsExtra.removeSync(WETDirPath);
+          }
+          fsExtra.mkdirSync(WETDirPath);
+          // download WET files for this batch with 5 simultenious downloads
+          workers = 5;
+          const WETUrls = WETPaths.split('\n').map((directortPath) => `${WET_PATH_PREFIX}${directortPath}`);
+          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 0, batch, resolve, reject);
+          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 1, batch, resolve, reject);
+          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 2, batch, resolve, reject);
+          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 3, batch, resolve, reject);
+          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 4, batch, resolve, reject);
+        },
+      }));
   });
-};
+});
 
 export default {
   fetchWETFiles,
