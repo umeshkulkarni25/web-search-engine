@@ -6,17 +6,19 @@ const { BOOKMARKED_TEMP_FILES_FOLDER, LEXICON } = process.env;
 const fileDescriptors = []; //  file descripter for bookmarked files
 let lexicon = null; // lexicon in array format
 // writeStream for file which maps terms to pointer offsets in the binary index
-const termToPointer = fs.createWriteStream(path.join(process.cwd(), 'termTopointer'));
+const termToPointer = fs.createWriteStream(path.join(process.cwd(), 'lexicon_with_byte_offset'));
 // writeStream for final binary index
 const indexStream = fs.createWriteStream(path.join(process.cwd(), 'index'));
 const store = []; // holds block header from bookmarked files
-
+let taskComplete = null;
+let taskErorred = null;
 /**
  * @description: reads the lexicon created by the tokenizer.
  */
 const readLexicon = () => new Promise((resolve, reject) => {
   let serializedLexicon = ''; // lexicon read as a string
-  fs.createReadStream(path.join(process.cwd(), LEXICON))
+  const lexiconPath = path.join(process.cwd(), LEXICON);
+  fs.createReadStream(lexiconPath)
     .on('data', (chunk) => {
       serializedLexicon += chunk;
     })
@@ -50,6 +52,21 @@ const refillHeaders = () => {
     }
   });
 };
+
+const dump = (termHeaders, index, termIndexBuffers, resolve, reject) => {
+  const termHeader = termHeaders[index];
+  if (!termHeader) {
+    resolve();
+    return;
+  }
+  const buffer = Buffer.alloc(termHeader.lengthOfBlock);
+  fs.read(fileDescriptors[termHeader.fdIndex], buffer, 0, termHeader.lengthOfBlock, null, (err, chunk) => {
+    termIndexBuffers.push(buffer);
+    // set used header entry to null so it can be filled up again in next iteration
+    store[termHeader.fdIndex] = null;
+    dump(termHeaders, index + 1, termIndexBuffers, resolve, reject);
+  });
+};
 /**
  *
  * @param {Object} termDescriptor: contains termId and length of its docId and frequency blocks.
@@ -57,22 +74,25 @@ const refillHeaders = () => {
  * @description: this function picks up all the blocks for a given termId from all the bookmarked-temp files
  *  and writes it to final index and provided offset
  */
-const createIndex = (termDescriptor, offsetInInvertedIndex) => {
+const createIndex = (termDescriptors, index, offsetInInvertedIndex) => {
+  const termDescriptor = termDescriptors[index];
+  if (!termDescriptor) {
+    console.log('index built!!!');
+    taskComplete();
+    return;
+  }
   const termIndexBuffers = [];
   refillHeaders(); // get the headers for current termId
   const termHeaders = _.filter(store, ['termId', parseInt(termDescriptor.split(' ')[1], 10)]);
   // read the block for docIds and frequency from all the files and write them to a index stream
-  _.each(termHeaders, (termHeader) => {
-    const buffer = Buffer.alloc(termHeader.lengthOfBlock);
-    fs.readSync(fileDescriptors[termHeader.fdIndex], buffer, 0, termHeader.lengthOfBlock, null);
-    termIndexBuffers.push(buffer);
-    // set used header entry to null so it can be filled up again in next iteration
-    store[termHeader.fdIndex] = null;
+  new Promise((resolve, reject) => {
+    dump(termHeaders, 0, termIndexBuffers, resolve, reject);
+  }).then(() => {
+    const termInvertedIndex = Buffer.concat(termIndexBuffers);
+    indexStream.write(termInvertedIndex);
+    termToPointer.write(`${termDescriptor.split(' ')[0]}, ${offsetInInvertedIndex + termInvertedIndex.length}\n`);
+    createIndex(termDescriptors, index + 1, offsetInInvertedIndex + termInvertedIndex.length);
   });
-  const termInvertedIndex = Buffer.concat(termIndexBuffers);
-  indexStream.write(termInvertedIndex);
-  termToPointer.write(`${termDescriptor.split(' ')[0]}, ${offsetInInvertedIndex + termInvertedIndex.length}\n`);
-  return termInvertedIndex.length;
 };
 /**
  * @description: this function reads the bookmarked files form BOOKMARKED_TEMP_FILES_FOLDER
@@ -81,23 +101,23 @@ const createIndex = (termDescriptor, offsetInInvertedIndex) => {
  *  goes over the bookmarked postings which are also sorted by termIds and merges them
  *  in an IO efficient manner
  */
-const start = () => new Promise((resolve, reject) => {
+const start = async () => {
   fs.readdir(path.join(process.cwd(), BOOKMARKED_TEMP_FILES_FOLDER), async (err, files) => {
     if (err) {
-      reject();
+      taskErorred();
     }
     await readLexicon();
     _.each(files, (file) => {
       const completeFilePath = path.join(process.cwd(), BOOKMARKED_TEMP_FILES_FOLDER, file);
       fileDescriptors.push(fs.openSync(completeFilePath));
     });
-    let offsetInInvertedIndex = 0;
-    for (let index = 0; index < lexicon.length; index += 1) {
-      offsetInInvertedIndex += createIndex(lexicon[index], offsetInInvertedIndex);
-    }
-    resolve();
+    console.log('started building index');
+    createIndex(lexicon, 0, 0);
   });
-});
-
+  return new Promise((resolve, reject) => {
+    taskComplete = resolve;
+    taskErorred = reject;
+  });
+};
 
 export default { start };

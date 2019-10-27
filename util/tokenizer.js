@@ -142,7 +142,7 @@ const tokenize = async (batch) => {
     buffer = fs.createWriteStream(path.join(tempFilePath, `batch_${batch.toString()}`));
     buffer.cork();
     pageTable.cork();
-    parseFilesRec(filePaths.slice(0, 1), 0, batch);
+    parseFilesRec(filePaths, 0, batch);
   });
   return new Promise((resolve, reject) => {
     tokenizingComplete = resolve;

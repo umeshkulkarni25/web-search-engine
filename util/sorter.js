@@ -37,7 +37,7 @@ const varByteCompression = (list) => {
   _.each(list, (num) => {
     compressedList.push(varByteEncode(num));
   });
-  compressedList = [].concat.apply([], compressedList);
+  compressedList = compressedList.flat();
   return Buffer.from(compressedList);
 };
 /**
@@ -55,7 +55,6 @@ const varByteCompression = (list) => {
 const readFileRec = (fd, content, position, bookmarkedTemp, resolve) => {
   fs.read(fd, content, 0, content.length, position, (err, bytesRead, content) => {
     if (bytesRead === 0) {
-      console.log('read file', new Date());
       bookmarkedTemp.end();
       currentTerm = null;
       resolve();
@@ -78,9 +77,9 @@ const readFileRec = (fd, content, position, bookmarkedTemp, resolve) => {
         const docIdBuffer = varByteCompression(docIds);
         const frequencyBuffer = varByteCompression(freqs);
         const listBuffer = Buffer.concat([docIdBuffer, frequencyBuffer]);
-        const lengthBuffer = Buffer.allocUnsafe(4);
-        lengthBuffer.writeUInt32BE(listBuffer.length);
-        bookmarkedTemp.write(Buffer.concat([termBuffer, lengthBuffer, listBuffer]));
+        const blockLengthBuffer = Buffer.allocUnsafe(4);
+        blockLengthBuffer.writeUInt32BE(listBuffer.length);
+        bookmarkedTemp.write(Buffer.concat([termBuffer, blockLengthBuffer, listBuffer]));
         currentTerm = termId;
         docIds = [docId];
         freqs = [freq];
@@ -112,12 +111,13 @@ const sort = (files, index) => {
     console.log(`bookmarking ${file}`, new Date());
     const fd = fs.openSync(path.join(process.cwd(), TEMP_FILES_FOLDER, file));
     const bookmarkedTemp = fs.createWriteStream(path.join(process.cwd(), BOOKMARKED_TEMP_FILES_FOLDER, `${file}_bookmarked`));
-    const bufferSize = 1000 * 10000;
+    const bufferSize = 1000 * 5000;
     const content = Buffer.alloc(bufferSize);
     const fileSorted = new Promise((resolve, reject) => {
       readFileRec(fd, content, 0, bookmarkedTemp, resolve);
     });
     fileSorted.then(() => {
+      console.log(`bookmarked ${file}`, new Date());
       sort(files, index + 1);
     });
   });

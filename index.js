@@ -19,10 +19,9 @@ import merger from './util/merger';
  *  postings and merges them to get the final index structure
  */
 const start = async () => {
-  // await batchProcessor.start();
-  // await sorter.start();
+  await batchProcessor.start();
+  await sorter.start();
   await merger.start();
-  console.log('index built');
 };
 
 start();
