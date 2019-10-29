@@ -79,7 +79,9 @@ const readFileRec = (fd, content, position, bookmarkedTemp, resolve) => {
         const listBuffer = Buffer.concat([docIdBuffer, frequencyBuffer]);
         const blockLengthBuffer = Buffer.allocUnsafe(4);
         blockLengthBuffer.writeUInt32BE(listBuffer.length);
-        bookmarkedTemp.write(Buffer.concat([termBuffer, blockLengthBuffer, listBuffer]));
+        const numberOfDocs = Buffer.allocUnsafe(4);
+        numberOfDocs.writeUInt32BE(docIds.length);
+        bookmarkedTemp.write(Buffer.concat([termBuffer, blockLengthBuffer, numberOfDocs, listBuffer]));
         currentTerm = termId;
         docIds = [docId];
         freqs = [freq];

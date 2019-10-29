@@ -44,19 +44,22 @@ const readLexicon = () => new Promise((resolve, reject) => {
 const refillHeaders = () => {
   _.each(fileDescriptors, (fd, fdIndex) => {
     if (!store[fdIndex]) {
-      const buffer = Buffer.alloc(8);
+      const buffer = Buffer.alloc(12);
       fs.readSync(fd, buffer, 0, buffer.length, null);
       const termId = buffer.readUInt32BE(0);
       const lengthOfBlock = buffer.readUInt32BE(4);
-      store[fdIndex] = { termId, lengthOfBlock, fdIndex };
+      const numberOfDocs = buffer.readUInt32BE(8);
+      store[fdIndex] = {
+        termId, lengthOfBlock, numberOfDocs, fdIndex,
+      };
     }
   });
 };
 
-const dump = (termHeaders, index, termIndexBuffers, resolve, reject) => {
+const dump = (termHeaders, index, termIndexBuffers, numberOfDocs, resolve, reject) => {
   const termHeader = termHeaders[index];
   if (!termHeader) {
-    resolve();
+    resolve({ termIndexBuffers, numberOfDocs });
     return;
   }
   const buffer = Buffer.alloc(termHeader.lengthOfBlock);
@@ -64,7 +67,7 @@ const dump = (termHeaders, index, termIndexBuffers, resolve, reject) => {
     termIndexBuffers.push(buffer);
     // set used header entry to null so it can be filled up again in next iteration
     store[termHeader.fdIndex] = null;
-    dump(termHeaders, index + 1, termIndexBuffers, resolve, reject);
+    dump(termHeaders, index + 1, termIndexBuffers, numberOfDocs + termHeader.numberOfDocs, resolve, reject);
   });
 };
 /**
@@ -81,16 +84,16 @@ const createIndex = (termDescriptors, index, offsetInInvertedIndex) => {
     taskComplete();
     return;
   }
-  const termIndexBuffers = [];
+
   refillHeaders(); // get the headers for current termId
   const termHeaders = _.filter(store, ['termId', parseInt(termDescriptor.split(' ')[1], 10)]);
   // read the block for docIds and frequency from all the files and write them to a index stream
   new Promise((resolve, reject) => {
-    dump(termHeaders, 0, termIndexBuffers, resolve, reject);
-  }).then(() => {
+    dump(termHeaders, 0, [], 0, resolve, reject);
+  }).then(({ termIndexBuffers, numberOfDocs }) => {
     const termInvertedIndex = Buffer.concat(termIndexBuffers);
     indexStream.write(termInvertedIndex);
-    termToPointer.write(`${termDescriptor.split(' ')[0]}, ${offsetInInvertedIndex + termInvertedIndex.length}\n`);
+    termToPointer.write(`${termDescriptor.split(' ')[0]}, ${offsetInInvertedIndex + termInvertedIndex.length}, ${numberOfDocs}\n`);
     createIndex(termDescriptors, index + 1, offsetInInvertedIndex + termInvertedIndex.length);
   });
 };
