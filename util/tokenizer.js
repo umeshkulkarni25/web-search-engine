@@ -59,6 +59,7 @@ const vetWord = (term) => {
  *  then each reacord is split into terms and term-frequency for the given record is calculated
  *  the <termID, docId, freq> posting is then written to temfile in binary format using streams
  */
+let totalTerm = 0;
 const parseFile = (file, index, batch) => new Promise((resolve, reject) => {
   console.log('starting warc file', batch * batchSize + index, 'time:', new Date());
   const WARCParser = new nodeWARC.AutoWARCParser(file);
@@ -77,13 +78,16 @@ const parseFile = (file, index, batch) => new Promise((resolve, reject) => {
     _.each(termSet, (term) => {
       const termBuffer = Buffer.alloc(4);
       termBuffer.writeUInt32BE(term);
+      if (term === 1) {
+        totalTerm += 1;
+      }
       const docIdBuffer = Buffer.alloc(4);
       docIdBuffer.writeUInt32BE(docIdCounter);
       const freqBuffer = Buffer.alloc(2);
       freqBuffer.writeUInt16BE(frequency[term]);
       buffer.write(Buffer.concat([termBuffer, docIdBuffer, freqBuffer]));
     });
-    pageTable.write(`${docIdCounter} ${warcHeader['WARC-Target-URI']}\n`);
+    pageTable.write(`${docIdCounter} ${warcHeader['WARC-Target-URI']} ${terms.length}\n`);
     docIdCounter += 1;
   });
   WARCParser.on('done', () => {
@@ -116,6 +120,7 @@ const parseFilesRec = (files, index, batch) => {
     pageTable.end();
     buffer = null;
     pageTable = null;
+    console.log(totalTerm);
     tokenizingComplete(lexicon);
     return;
   }

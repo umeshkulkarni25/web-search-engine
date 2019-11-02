@@ -5,13 +5,13 @@ import _ from 'lodash';
 const { BOOKMARKED_TEMP_FILES_FOLDER, LEXICON } = process.env;
 const fileDescriptors = []; //  file descripter for bookmarked files
 let lexicon = null; // lexicon in array format
-// writeStream for file which maps terms to pointer offsets in the binary index
-const termToPointer = fs.createWriteStream(path.join(process.cwd(), 'lexicon_with_byte_offset'));
-// writeStream for final binary index
-const indexStream = fs.createWriteStream(path.join(process.cwd(), 'index'));
 const store = []; // holds block header from bookmarked files
 let taskComplete = null;
 let taskErorred = null;
+// writeStream for file which maps terms to pointer offsets in the binary index
+let  termToPointer = null;
+// writeStream for final binary index
+let indexStream = null;
 /**
  * @description: reads the lexicon created by the tokenizer.
  */
@@ -105,6 +105,10 @@ const createIndex = (termDescriptors, index, offsetInInvertedIndex) => {
  *  in an IO efficient manner
  */
 const start = async () => {
+  // writeStream for file which maps terms to pointer offsets in the binary index
+ termToPointer = fs.createWriteStream(path.join(process.cwd(), 'lexicon_with_byte_offset'));
+// writeStream for final binary index
+ indexStream = fs.createWriteStream(path.join(process.cwd(), 'index'));
   fs.readdir(path.join(process.cwd(), BOOKMARKED_TEMP_FILES_FOLDER), async (err, files) => {
     if (err) {
       taskErorred();

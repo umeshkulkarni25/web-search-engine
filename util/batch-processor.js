@@ -7,7 +7,7 @@ import commonCrawl from './common-crawl';
 
 let taskComplete = null;
 let taskErorred = null;
-const { NUMBER_OF_BATCHES, TEMP_FILES_FOLDER } = process.env;
+const { NUMBER_OF_BATCHES, TEMP_FILES_FOLDER, PAGE_TABLE } = process.env;
 
 /**
  *
@@ -51,6 +51,7 @@ const start = () => {
     fsExtra.removeSync(tempFolderPath);
   }
   fsExtra.mkdirSync(tempFolderPath);
+  fs.createWriteStream(path.join(process.cwd(), PAGE_TABLE)).end();
   fetchAndTokenize(0, {});
   return new Promise((resolve, reject) => {
     taskComplete = resolve;

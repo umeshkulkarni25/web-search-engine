@@ -2,7 +2,7 @@
 import batchProcessor from './util/batch-processor';
 import sorter from './util/sorter';
 import merger from './util/merger';
-
+import queryProcessor from './util/query-processor';
 
 /**
  *
@@ -19,9 +19,10 @@ import merger from './util/merger';
  *  postings and merges them to get the final index structure
  */
 const start = async () => {
-  await batchProcessor.start();
-  await sorter.start();
-  await merger.start();
+  // await batchProcessor.start();
+  // await sorter.start();
+  // await merger.start();
+  queryProcessor.start();
 };
 
 start();

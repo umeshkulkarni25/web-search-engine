@@ -5,8 +5,6 @@ import fsExtra from 'fs-extra';
 import _ from 'lodash';
 
 const { TEMP_FILES_FOLDER, BOOKMARKED_TEMP_FILES_FOLDER } = process.env;
-let docIds = []; // stores docId block for given termId
-let freqs = []; // stores frequecy block for given termId
 let currentTerm = null; // current term by which the groupBy is being performed
 let taskComplete = null;
 let taskErrored = null;
@@ -53,6 +51,7 @@ const varByteCompression = (list) => {
  *  var-Byte compreesing is applied to docId block as well as frequecy blocks
  */
 const readFileRec = (fd, content, position, bookmarkedTemp, resolve) => {
+  let postings = [];
   fs.read(fd, content, 0, content.length, position, (err, bytesRead, content) => {
     if (bytesRead === 0) {
       bookmarkedTemp.end();
@@ -63,28 +62,30 @@ const readFileRec = (fd, content, position, bookmarkedTemp, resolve) => {
     if (!currentTerm) {
       currentTerm = content.readUInt32BE(0);
     }
-    for (let j = 0; j < bytesRead; j += 10) {
-      const record = content.slice(j, j + 10);
+    for (let recordIndex = 0; recordIndex < bytesRead; recordIndex += 10) {
+      const record = content.slice(recordIndex, recordIndex + 10);
       const termId = record.readUInt32BE(0);
       const docId = record.readUInt32BE(4);
       const freq = record.readUInt16BE(8);
       if (termId === currentTerm) {
-        docIds.push(docId);
-        freqs.push(freq);
+        postings.push([docId, freq]);
       } else {
+        const sortedPostings = _.sortBy(postings, (posting) => posting[0]);
+        const [sortedDocIds, freqs] = _.reduce(sortedPostings, (unzippedPostings, posting) => {
+          unzippedPostings[0].push(posting[0]);
+          unzippedPostings[1].push(posting[1]);
+          return unzippedPostings;
+        }, [[], []]);
         const termBuffer = Buffer.allocUnsafe(4);
         termBuffer.writeUInt32BE(currentTerm);
-        const docIdBuffer = varByteCompression(docIds);
-        const frequencyBuffer = varByteCompression(freqs);
-        const listBuffer = Buffer.concat([docIdBuffer, frequencyBuffer]);
+        const listBuffer = Buffer.concat([varByteCompression(sortedDocIds), varByteCompression(freqs)]);
         const blockLengthBuffer = Buffer.allocUnsafe(4);
         blockLengthBuffer.writeUInt32BE(listBuffer.length);
         const numberOfDocs = Buffer.allocUnsafe(4);
-        numberOfDocs.writeUInt32BE(docIds.length);
+        numberOfDocs.writeUInt32BE(sortedDocIds.length);
         bookmarkedTemp.write(Buffer.concat([termBuffer, blockLengthBuffer, numberOfDocs, listBuffer]));
         currentTerm = termId;
-        docIds = [docId];
-        freqs = [freq];
+        postings = [[docId, freq]];
       }
     }
     readFileRec(fd, content, position + bytesRead, bookmarkedTemp, resolve);
