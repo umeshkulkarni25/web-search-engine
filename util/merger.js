@@ -9,9 +9,42 @@ const store = []; // holds block header from bookmarked files
 let taskComplete = null;
 let taskErorred = null;
 // writeStream for file which maps terms to pointer offsets in the binary index
-let  termToPointer = null;
+let termToPointer = null;
 // writeStream for final binary index
 let indexStream = null;
+
+/**
+ * @param {Number} num: number to be var-byte encodeds
+ * @returns {Array} array of numbers in decimal format to be converted in binary by the caller
+ */
+const varByteEncode = (num) => {
+  const code = [];
+  while (true) {
+    code.unshift(num % 128);
+    num = Math.floor(num / 128);
+    if (num === 0) {
+      break;
+    }
+  }
+  code[code.length - 1] += 128;
+  return code;
+};
+
+/**
+ * @param {Array} list: array of integers to which var-byte ecoding is applied to
+ * @returns {Buffer}: var-byte encoded list in binary format
+ * @description: this function helps doing var-byte encoding for the docIds and frequecy blockss
+ *  and concats all the individual var-bytes into one binary array block
+ */
+const varByteCompression = (list) => {
+  let compressedList = [];
+  _.each(list, (num) => {
+    compressedList.push(varByteEncode(num));
+  });
+  compressedList = compressedList.flat();
+  return Buffer.from(compressedList);
+};
+
 /**
  * @description: reads the lexicon created by the tokenizer.
  */
@@ -44,22 +77,21 @@ const readLexicon = () => new Promise((resolve, reject) => {
 const refillHeaders = () => {
   _.each(fileDescriptors, (fd, fdIndex) => {
     if (!store[fdIndex]) {
-      const buffer = Buffer.alloc(12);
+      const buffer = Buffer.alloc(8);
       fs.readSync(fd, buffer, 0, buffer.length, null);
       const termId = buffer.readUInt32BE(0);
       const lengthOfBlock = buffer.readUInt32BE(4);
-      const numberOfDocs = buffer.readUInt32BE(8);
       store[fdIndex] = {
-        termId, lengthOfBlock, numberOfDocs, fdIndex,
+        termId, lengthOfBlock, fdIndex,
       };
     }
   });
 };
 
-const dump = (termHeaders, index, termIndexBuffers, numberOfDocs, resolve, reject) => {
+const dump = (termHeaders, index, termIndexBuffers, resolve, reject) => {
   const termHeader = termHeaders[index];
   if (!termHeader) {
-    resolve({ termIndexBuffers, numberOfDocs });
+    resolve({ termIndexBuffers });
     return;
   }
   const buffer = Buffer.alloc(termHeader.lengthOfBlock);
@@ -67,7 +99,7 @@ const dump = (termHeaders, index, termIndexBuffers, numberOfDocs, resolve, rejec
     termIndexBuffers.push(buffer);
     // set used header entry to null so it can be filled up again in next iteration
     store[termHeader.fdIndex] = null;
-    dump(termHeaders, index + 1, termIndexBuffers, numberOfDocs + termHeader.numberOfDocs, resolve, reject);
+    dump(termHeaders, index + 1, termIndexBuffers, resolve, reject);
   });
 };
 /**
@@ -77,10 +109,10 @@ const dump = (termHeaders, index, termIndexBuffers, numberOfDocs, resolve, rejec
  * @description: this function picks up all the blocks for a given termId from all the bookmarked-temp files
  *  and writes it to final index and provided offset
  */
-const createIndex = (termDescriptors, index, offsetInInvertedIndex) => {
+const createIndex = (termDescriptors, index, offsetInvertedIndex) => {
   const termDescriptor = termDescriptors[index];
   if (!termDescriptor) {
-    console.log('index built!!!');
+    console.log('index built!!!', new Date());
     taskComplete();
     return;
   }
@@ -89,12 +121,34 @@ const createIndex = (termDescriptors, index, offsetInInvertedIndex) => {
   const termHeaders = _.filter(store, ['termId', parseInt(termDescriptor.split(' ')[1], 10)]);
   // read the block for docIds and frequency from all the files and write them to a index stream
   new Promise((resolve, reject) => {
-    dump(termHeaders, 0, [], 0, resolve, reject);
+    dump(termHeaders, 0, [], resolve, reject);
   }).then(({ termIndexBuffers, numberOfDocs }) => {
     const termInvertedIndex = Buffer.concat(termIndexBuffers);
-    indexStream.write(termInvertedIndex);
-    termToPointer.write(`${termDescriptor.split(' ')[0]}, ${offsetInInvertedIndex + termInvertedIndex.length}, ${numberOfDocs}\n`);
-    createIndex(termDescriptors, index + 1, offsetInInvertedIndex + termInvertedIndex.length);
+    const postings = [];
+    for (let postingIndex = 0; postingIndex < termInvertedIndex.length; postingIndex += 6) {
+      const posting = termInvertedIndex.slice(postingIndex, postingIndex + 6);
+      const docId = posting.readUInt32BE(0);
+      const freq = posting.readUInt16BE(4);
+      postings.push([docId, freq]);
+    }
+    const sortedPostings = _.sortBy(postings, (posting) => posting[0]);
+    const [sortedDocIds, freqs] = _.reduce(sortedPostings, (unzippedPostings, posting) => {
+      unzippedPostings[0].push(posting[0]);
+      unzippedPostings[1].push(posting[1]);
+      return unzippedPostings;
+    },
+    [[], []]);
+    let previousDocId = 0;
+    const sortedDocIdsWithDiff = _.map(sortedDocIds, (currentDocId) => {
+      const diff = currentDocId - previousDocId;
+      previousDocId = currentDocId;
+      return diff;
+    });
+    const docIdsBuffer = varByteCompression(sortedDocIdsWithDiff);
+    const compressedInvertedList = Buffer.concat([docIdsBuffer, varByteCompression(freqs)]);
+    indexStream.write(compressedInvertedList);
+    termToPointer.write(`${termDescriptor.split(' ')[0]}, ${offsetInvertedIndex + docIdsBuffer.length}, ${offsetInvertedIndex + compressedInvertedList.length}, ${sortedDocIds.length}\n`);
+    createIndex(termDescriptors, index + 1, offsetInvertedIndex + compressedInvertedList.length);
   });
 };
 /**
@@ -106,9 +160,9 @@ const createIndex = (termDescriptors, index, offsetInInvertedIndex) => {
  */
 const start = async () => {
   // writeStream for file which maps terms to pointer offsets in the binary index
- termToPointer = fs.createWriteStream(path.join(process.cwd(), 'lexicon_with_byte_offset'));
-// writeStream for final binary index
- indexStream = fs.createWriteStream(path.join(process.cwd(), 'index'));
+  termToPointer = fs.createWriteStream(path.join(process.cwd(), 'lexicon_with_byte_offset'));
+  // writeStream for final binary index
+  indexStream = fs.createWriteStream(path.join(process.cwd(), 'index'));
   fs.readdir(path.join(process.cwd(), BOOKMARKED_TEMP_FILES_FOLDER), async (err, files) => {
     if (err) {
       taskErorred();
@@ -118,7 +172,7 @@ const start = async () => {
       const completeFilePath = path.join(process.cwd(), BOOKMARKED_TEMP_FILES_FOLDER, file);
       fileDescriptors.push(fs.openSync(completeFilePath));
     });
-    console.log('started building index');
+    console.log('started building index', new Date());
     createIndex(lexicon, 0, 0);
   });
   return new Promise((resolve, reject) => {

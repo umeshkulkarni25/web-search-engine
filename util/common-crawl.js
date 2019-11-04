@@ -4,12 +4,14 @@ import axios from 'axios';
 import fs from 'fs';
 import fsExtra from 'fs-extra';
 import path from 'path';
+import _ from 'lodash';
 
-const workerLimit = 5; // total workers allowed for simultaneous downloadings
-let workers = 5; // number of current workers
 const {
-  WET_PATH_URL, WET_PATH_PREFIX, WET_FILES_FOLDER, WET_FILES_PER_BATCH,
+  WET_PATH_URL, WET_PATH_PREFIX, WET_FILES_FOLDER, WET_FILES_PER_BATCH, DOWNLOAD_WORKERS,
 } = process.env;
+
+const workerLimit = parseInt(DOWNLOAD_WORKERS, 10); // total workers allowed for simultaneous downloadings
+let workers = workerLimit;
 const WETDirPath = path.join(process.cwd(), WET_FILES_FOLDER);
 /**
  *
@@ -77,13 +79,11 @@ const fetchWETFiles = (batch) => new Promise((resolve, reject) => {
           }
           fsExtra.mkdirSync(WETDirPath);
           // download WET files for this batch with 5 simultenious downloads
-          workers = 5;
           const WETUrls = WETPaths.split('\n').map((directortPath) => `${WET_PATH_PREFIX}${directortPath}`);
-          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 0, batch, resolve, reject);
-          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 1, batch, resolve, reject);
-          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 2, batch, resolve, reject);
-          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 3, batch, resolve, reject);
-          fetch(WETUrls, batch * WET_FILES_PER_BATCH + 4, batch, resolve, reject);
+          workers = workerLimit;
+          _.each(new Array(workerLimit).fill(0), (data, workerIndex) => {
+            fetch(WETUrls, batch * WET_FILES_PER_BATCH + workerIndex, batch, resolve, reject);
+          });
         },
       }));
   });

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import _ from 'lodash';
+import Document from './database/Document';
 
 const { LEXICON_WITH_BYTE_OFFSET, PAGE_TABLE } = process.env;
 
@@ -104,19 +105,25 @@ const parsePageTable = () => new Promise((resolve, reject) => {
 const varByteDecode = (block, numberOfDocs) => {
   let num = 0;
   let i = 0;
-  const docIds = []; const freqs = [];
+  const docIdsDiff = []; const freqs = [];
 
-  while (docIds.length < numberOfDocs) {
+  while (docIdsDiff.length < numberOfDocs) {
     const byte = block.readUInt8(i);
     if (byte < 128) {
       num = (num + byte) * 128;
     } else {
       num += byte - 128;
-      docIds.push(num);
+      docIdsDiff.push(num);
       num = 0;
     }
     i += 1;
   }
+  let previousDocId = 0;
+  const docIds = _.map(docIdsDiff, (currentDocId) => {
+    const docId = currentDocId + previousDocId;
+    previousDocId = docId;
+    return docId;
+  });
   while (freqs.length < numberOfDocs) {
     const byte = block.readUInt8(i);
     if (byte < 128) {
@@ -144,6 +151,7 @@ const BM25 = (totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, do
   const K = k_1 * ((1 - b) + b * (docLength / avgLengthOfDocInCollection));
   let score = 0;
   _.each(termFreqs, (termFreq, index) => {
+    if (!termFreq) { termFreq = 0; }
     score
       += Math.log((totalNumberOfDocsInCollection - numberOfDocsWithTerm[index] + 0.5) / (numberOfDocsWithTerm[index] + 0.5))
       * (((k_1 + 1) * termFreq) / (K + termFreq));
@@ -155,7 +163,6 @@ const DAAT = (decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNum
   sortedDecodedTermBlocks = _.map(sortedDecodedTermBlocks, (block) => { block.push(0); return block; });
   const shortestTermBlock = sortedDecodedTermBlocks[0];
   let dId = 0;
-  const intersection = [];
   let results = [];
   while (shortestTermBlock[3] < shortestTermBlock[0].length) {
     const result = nextGEQ(shortestTermBlock[0], shortestTermBlock[3], dId);
@@ -173,8 +180,6 @@ const DAAT = (decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNum
       }
     }
     if (i === decodedTermBlocks.length) {
-      intersection.push(dId);
-      if (!dId) { break; }
       const docLength = pageTable[dId][1];
       const termFreqs = _.map(sortedDecodedTermBlocks, (block) => block[1][block[3] - 1]);
       const numberOfDocsWithTerm = _.map(sortedDecodedTermBlocks, (block) => block[2]);
@@ -183,23 +188,62 @@ const DAAT = (decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNum
       while (results[index] && (results[index][0] > score)) {
         index += 1;
       }
-      results.splice(index + 1, 1, [score, pageTable[dId][0]]);
+      results.splice(index + 1, 1, [score, dId, termFreqs]);
       if (results.length > 10) {
         results = results.slice(0, 10);
       }
     }
+    // else {
+    //   const docLength = pageTable[dId][1];
+    //   const termFreqs = _.map(sortedDecodedTermBlocks, (block) => block[1][block[3] - 1]);
+    //   const numberOfDocsWithTerm = _.map(sortedDecodedTermBlocks, (block) => block[2]);
+    //   const score = BM25(totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, docLength, avgLengthOfDocInCollection);
+    //   let index = 0;
+    //   while (results[index] && (results[index][0] > score)) {
+    //     index += 1;
+    //   }
+    //   results.splice(index + 1, 1, [score, dId]);
+    //   if (results.length > 10) {
+    //     results = results.slice(0, 10);
+    //   }
+    // }
   }
-  console.log(results);
+  return results;
 };
 
+const openList = (termIndexOffsets, indexFd) => Promise.all(_.map(termIndexOffsets, (termIndexOffset) => readBlock(indexFd, termIndexOffset)));
 const processQuery = (query, lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection) => {
   const terms = query.split(' ');
   const termIndexOffsets = _.map(terms, (term) => lexicon[term]);
-  Promise
-    .all(_.map(termIndexOffsets, (termIndexOffset) => readBlock(indexFd, termIndexOffset)))
+  openList(termIndexOffsets, indexFd)
     .then((termBlocks) => {
       const decodedTermBlocks = _.map(termBlocks, (block, index) => varByteDecode(block, termIndexOffsets[index][2]));
-      DAAT(decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
+      const results = DAAT(decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
+      console.log(results);
+      const snippets = [];
+      _.each(results, (result) => {
+        snippets.push(Document.findOne({ docId: result[1] }));
+      });
+      Promise
+        .all(snippets)
+        .then((docs) => {
+          _.each(docs, (doc, index) => {
+            const content = doc.content.toLowerCase();
+            let finalSnippet = '';
+            _.each(terms, (term) => {
+              const termIndex = content.indexOf(term);
+              if (termIndex > 0) {
+                finalSnippet = `${finalSnippet}...${content.slice(termIndex - 30, termIndex + 30)}`;
+              }
+            });
+            console.log({
+              bm25: results[index][0],
+              termFreqs: results[index][3],
+              url: pageTable[results[index][1]][0],
+              snippet: finalSnippet,
+            });
+          });
+        });
     });
 };
 
@@ -207,12 +251,10 @@ const start = () => {
   Promise
     .all([parseLexicon(), parsePageTable(), openIndex()])
     .then(([lexicon, { pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection }, indexFd]) => {
-    //
       console.log('accepting queries now');
       const stdin = process.openStdin();
-
       stdin.addListener('data', (d) => {
-        processQuery(d.toString().trim(), lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
+        processQuery(d.toString().trim().toLowerCase(), lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
       });
     });
 };

@@ -8,36 +8,7 @@ const { TEMP_FILES_FOLDER, BOOKMARKED_TEMP_FILES_FOLDER } = process.env;
 let currentTerm = null; // current term by which the groupBy is being performed
 let taskComplete = null;
 let taskErrored = null;
-/**
- * @param {Number} num: number to be var-byte encodeds
- * @returns {Array} array of numbers in decimal format to be converted in binary by the caller
- */
-const varByteEncode = (num) => {
-  const code = [];
-  while (true) {
-    code.unshift(num % 128);
-    num = Math.floor(num / 128);
-    if (num === 0) {
-      break;
-    }
-  }
-  code[code.length - 1] += 128;
-  return code;
-};
-/**
- * @param {Array} list: array of integers to which var-byte ecoding is applied to
- * @returns {Buffer}: var-byte encoded list in binary format
- * @description: this function helps doing var-byte encoding for the docIds and frequecy blockss
- *  and concats all the individual var-bytes into one binary array block
- */
-const varByteCompression = (list) => {
-  let compressedList = [];
-  _.each(list, (num) => {
-    compressedList.push(varByteEncode(num));
-  });
-  compressedList = compressedList.flat();
-  return Buffer.from(compressedList);
-};
+
 /**
  *
  * @param {Object} fd: file descriptor of the file being bookmarked
@@ -65,27 +36,18 @@ const readFileRec = (fd, content, position, bookmarkedTemp, resolve) => {
     for (let recordIndex = 0; recordIndex < bytesRead; recordIndex += 10) {
       const record = content.slice(recordIndex, recordIndex + 10);
       const termId = record.readUInt32BE(0);
-      const docId = record.readUInt32BE(4);
-      const freq = record.readUInt16BE(8);
+      const posting = record.slice(4);
       if (termId === currentTerm) {
-        postings.push([docId, freq]);
+        postings.push(posting);
       } else {
-        const sortedPostings = _.sortBy(postings, (posting) => posting[0]);
-        const [sortedDocIds, freqs] = _.reduce(sortedPostings, (unzippedPostings, posting) => {
-          unzippedPostings[0].push(posting[0]);
-          unzippedPostings[1].push(posting[1]);
-          return unzippedPostings;
-        }, [[], []]);
         const termBuffer = Buffer.allocUnsafe(4);
         termBuffer.writeUInt32BE(currentTerm);
-        const listBuffer = Buffer.concat([varByteCompression(sortedDocIds), varByteCompression(freqs)]);
+        const postingsBuffer = Buffer.concat(postings);
         const blockLengthBuffer = Buffer.allocUnsafe(4);
-        blockLengthBuffer.writeUInt32BE(listBuffer.length);
-        const numberOfDocs = Buffer.allocUnsafe(4);
-        numberOfDocs.writeUInt32BE(sortedDocIds.length);
-        bookmarkedTemp.write(Buffer.concat([termBuffer, blockLengthBuffer, numberOfDocs, listBuffer]));
+        blockLengthBuffer.writeUInt32BE(postingsBuffer.length);
+        bookmarkedTemp.write(Buffer.concat([termBuffer, blockLengthBuffer, postingsBuffer]));
         currentTerm = termId;
-        postings = [[docId, freq]];
+        postings = [record.slice(4)];
       }
     }
     readFileRec(fd, content, position + bytesRead, bookmarkedTemp, resolve);

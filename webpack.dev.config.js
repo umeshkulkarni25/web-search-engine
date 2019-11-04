@@ -21,7 +21,9 @@ module.exports = {
     }],
   },
   plugins: [
-    new NodemonPlugin(),
+    new NodemonPlugin({
+      nodeArgs: ['--max-old-space-size=6144'],
+    }),
     new Dotenv({
       path: './.dev.env',
     }),

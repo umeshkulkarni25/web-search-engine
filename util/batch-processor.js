@@ -4,6 +4,7 @@ import fsExtra from 'fs-extra';
 import path from 'path';
 import tokenizer from './tokenizer';
 import commonCrawl from './common-crawl';
+import Document from './database/Document';
 
 let taskComplete = null;
 let taskErorred = null;
@@ -52,7 +53,9 @@ const start = () => {
   }
   fsExtra.mkdirSync(tempFolderPath);
   fs.createWriteStream(path.join(process.cwd(), PAGE_TABLE)).end();
-  fetchAndTokenize(0, {});
+  Document.collection.drop().then(() => {
+    fetchAndTokenize(0, {});
+  });
   return new Promise((resolve, reject) => {
     taskComplete = resolve;
     taskErorred = reject;
