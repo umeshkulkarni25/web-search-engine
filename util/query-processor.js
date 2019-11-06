@@ -16,7 +16,7 @@ const openIndex = () => new Promise((resolve, reject) => {
   });
 });
 
-const readBlock = (fd, [position, blockLength]) => new Promise((resolve, reject) => {
+const readBlock = (fd, position, blockLength) => new Promise((resolve, reject) => {
   fs.read(fd, Buffer.alloc(blockLength), 0, blockLength, position, (err, bytesRead, buffer) => {
     if (err || bytesRead !== blockLength) {
       reject();
@@ -47,14 +47,15 @@ const parseLexicon = () => new Promise((resolve, reject) => {
       const lexicon = {};
       const semiParsedLexicon = _.map(serializedLexicon.split('\n'), (entry) => {
         const parsedEntry = entry.split(', ');
-        return [parsedEntry[0], parseInt(parsedEntry[1], 10), parseInt(parsedEntry[2], 10)];
+        return [parsedEntry[0], parseInt(parsedEntry[1], 10), parseInt(parsedEntry[2], 10), parseInt(parsedEntry[3], 10)];
       });
-      _.each(semiParsedLexicon, ([term, endOfTermIndex, numberOfDocs], index) => {
+      _.each(semiParsedLexicon, ([term, endOfDocIdBlock, endOfFreqBlock, numberOfDocs], index) => {
         const previousEntry = semiParsedLexicon[index - 1];
-        const startOfTermIndex = previousEntry ? previousEntry[1] : 0;
+        const startOfTermIndex = previousEntry ? previousEntry[2] : 0;
         lexicon[term] = [
           startOfTermIndex,
-          endOfTermIndex - startOfTermIndex,
+          endOfDocIdBlock,
+          endOfFreqBlock,
           numberOfDocs,
         ];
       });
@@ -102,47 +103,46 @@ const parsePageTable = () => new Promise((resolve, reject) => {
     });
 });
 
-const varByteDecode = (block, numberOfDocs) => {
+const varByteDecode = (varByteCompressedBlock, position) => {
   let num = 0;
-  let i = 0;
-  const docIdsDiff = []; const freqs = [];
-
-  while (docIdsDiff.length < numberOfDocs) {
-    const byte = block.readUInt8(i);
+  let index = position;
+  while (true) {
+    const byte = varByteCompressedBlock.readUInt8(index);
     if (byte < 128) {
       num = (num + byte) * 128;
     } else {
       num += byte - 128;
-      docIdsDiff.push(num);
-      num = 0;
+      break;
     }
-    i += 1;
+    index += 1;
   }
-  let previousDocId = 0;
-  const docIds = _.map(docIdsDiff, (currentDocId) => {
-    const docId = currentDocId + previousDocId;
-    previousDocId = docId;
-    return docId;
-  });
-  while (freqs.length < numberOfDocs) {
-    const byte = block.readUInt8(i);
-    if (byte < 128) {
-      num = num * 128 + byte * 128;
-    } else {
-      num += byte - 128;
-      freqs.push(num);
-      num = 0;
-    }
-    i += 1;
-  }
-  return [docIds, freqs, numberOfDocs];
+  return [num, index + 1];
 };
 
-const nextGEQ = (list, listIndex, docId) => {
-  while (list[listIndex] < docId) {
-    listIndex += 1;
+const nextGEQ = (list, docId) => {
+  while (true) {
+    if (list.numberOfDocIdsRead >= list.numberOfDocIds) {
+      break;
+    }
+    const [diff, docIdPointer] = varByteDecode(list.compressedDocIds, list.compressedDocIdPointer);
+    list.lastReadDocId += diff;
+    list.numberOfDocIdsRead += 1;
+    list.compressedDocIdPointer = docIdPointer;
+    if (list.lastReadDocId >= docId) {
+      break;
+    }
   }
-  return [list[listIndex], listIndex + 1];
+  return list.lastReadDocId;
+};
+
+const getFreq = (list) => {
+  while (list.numberOfFreqsRead < list.numberOfDocIdsRead) {
+    const [diff, freqPointer] = varByteDecode(list.compressedFreqs, list.compressedFreqsPointer);
+    list.lastReadFreq += diff;
+    list.numberOfFreqsRead += 1;
+    list.compressedFreqsPointer = freqPointer;
+  }
+  return list.lastReadFreq;
 };
 
 const BM25 = (totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, docLength, avgLengthOfDocInCollection) => {
@@ -158,67 +158,113 @@ const BM25 = (totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, do
   });
   return score;
 };
-const DAAT = (decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection) => {
-  let sortedDecodedTermBlocks = _.sortBy(decodedTermBlocks, (termBlock) => termBlock[2]);
-  sortedDecodedTermBlocks = _.map(sortedDecodedTermBlocks, (block) => { block.push(0); return block; });
-  const shortestTermBlock = sortedDecodedTermBlocks[0];
+const DAAT = (lists, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection) => {
+  const sortedListsByNumberOfDocs = _.sortBy(lists, (list) => list.numberOfDocIds);
+  const shortestList = sortedListsByNumberOfDocs[0];
   let dId = 0;
   let results = [];
-  while (shortestTermBlock[3] < shortestTermBlock[0].length) {
-    const result = nextGEQ(shortestTermBlock[0], shortestTermBlock[3], dId);
-    shortestTermBlock[3] = result[1];
-    dId = result[0];
-    let i = 1;
-    for (i; i < sortedDecodedTermBlocks.length; i += 1) {
-      const block = sortedDecodedTermBlocks[i];
-      const geqResult = nextGEQ(block[0], block[3], dId);
-      block[3] = geqResult[1];
-      const nextGEQDId = geqResult[0];
+  let reachedEndOfOneOfTheLists = false;
+  while (!reachedEndOfOneOfTheLists) {
+    dId = nextGEQ(shortestList, dId);
+    if (shortestList.numberOfDocIds === shortestList.numberOfDocIdsRead) {
+      reachedEndOfOneOfTheLists = true;
+    }
+    let docIdInIntersection = true;
+    for (let listIndex = 1; listIndex < sortedListsByNumberOfDocs.length; listIndex += 1) {
+      const list = sortedListsByNumberOfDocs[listIndex];
+      const nextGEQDId = nextGEQ(list, dId);
+      if (list.numberOfDocIds === list.numberOfDocIdsRead) {
+        reachedEndOfOneOfTheLists = true;
+      }
       if (nextGEQDId > dId) {
         dId = nextGEQDId;
+        docIdInIntersection = false;
         break;
       }
     }
-    if (i === decodedTermBlocks.length) {
+    if (docIdInIntersection) {
       const docLength = pageTable[dId][1];
-      const termFreqs = _.map(sortedDecodedTermBlocks, (block) => block[1][block[3] - 1]);
-      const numberOfDocsWithTerm = _.map(sortedDecodedTermBlocks, (block) => block[2]);
+      const termFreqs = _.map(sortedListsByNumberOfDocs, (list) => getFreq(list));
+      const numberOfDocsWithTerm = _.map(sortedListsByNumberOfDocs, (list) => list.numberOfDocIds);
       const score = BM25(totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, docLength, avgLengthOfDocInCollection);
       let index = 0;
       while (results[index] && (results[index][0] > score)) {
         index += 1;
       }
-      results.splice(index + 1, 1, [score, dId, termFreqs]);
+      results.splice(index, 0, [score, dId, termFreqs]);
       if (results.length > 10) {
         results = results.slice(0, 10);
       }
     }
-    // else {
-    //   const docLength = pageTable[dId][1];
-    //   const termFreqs = _.map(sortedDecodedTermBlocks, (block) => block[1][block[3] - 1]);
-    //   const numberOfDocsWithTerm = _.map(sortedDecodedTermBlocks, (block) => block[2]);
-    //   const score = BM25(totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, docLength, avgLengthOfDocInCollection);
-    //   let index = 0;
-    //   while (results[index] && (results[index][0] > score)) {
-    //     index += 1;
-    //   }
-    //   results.splice(index + 1, 1, [score, dId]);
-    //   if (results.length > 10) {
-    //     results = results.slice(0, 10);
-    //   }
-    // }
+    if (reachedEndOfOneOfTheLists) {
+      break;
+    }
   }
   return results;
 };
 
-const openList = (termIndexOffsets, indexFd) => Promise.all(_.map(termIndexOffsets, (termIndexOffset) => readBlock(indexFd, termIndexOffset)));
+const refillDocIds = (docIdsCollection, lists) => _.reduce(lists, (acc, list) => {
+  const docId = nextGEQ(list, 0);
+  if (_.has(acc, docId)) {
+    acc[docId].push(list);
+  } else {
+    acc[docId] = [list];
+  }
+  return acc;
+}, docIdsCollection);
+
+const getNumberOfEmptyLists = (lists) => _.reduce(lists, (numberOfEmptyLists, list) => (list.numberOfDocIdsRead === list.numberOfDocIds ? numberOfEmptyLists + 1 : numberOfEmptyLists), 0);
+
+const conjuctive = (lists, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection) => {
+  let groupByDocIds = refillDocIds({}, lists);
+  let results = [];
+  let numberOfEmptyLists = getNumberOfEmptyLists(lists);
+  while (numberOfEmptyLists < lists.length) {
+    const sortedDocIds = _.sortBy(_.map(_.keys(groupByDocIds), (docId) => parseInt(docId, 10)));
+    const docLength = pageTable[sortedDocIds[0]][1];
+    const termFreqs = _.map(groupByDocIds[sortedDocIds[0]], (list) => getFreq(list));
+    const numberOfDocsWithTerm = _.map(groupByDocIds[sortedDocIds[0]], (list) => list.numberOfDocIds);
+    const score = BM25(totalNumberOfDocsInCollection, termFreqs, numberOfDocsWithTerm, docLength, avgLengthOfDocInCollection);
+    let index = 0;
+    while (results[index] && (results[index][0] > score)) {
+      index += 1;
+    }
+    results.splice(index, 0, [score, sortedDocIds[0], termFreqs]);
+    if (results.length > 10) {
+      results = results.slice(0, 10);
+    }
+    groupByDocIds = refillDocIds(groupByDocIds, groupByDocIds[sortedDocIds[0]]);
+    numberOfEmptyLists = getNumberOfEmptyLists(lists);
+    delete groupByDocIds[sortedDocIds[0]];
+  }
+  console.log(results);
+  return results;
+};
+const openLists = (fd, listHeaders) => Promise.all(_.map(listHeaders, (listHeader) => readBlock(fd, listHeader[0], listHeader[2] - listHeader[0])));
 const processQuery = (query, lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection) => {
   const terms = query.split(' ');
-  const termIndexOffsets = _.map(terms, (term) => lexicon[term]);
-  openList(termIndexOffsets, indexFd)
-    .then((termBlocks) => {
-      const decodedTermBlocks = _.map(termBlocks, (block, index) => varByteDecode(block, termIndexOffsets[index][2]));
-      const results = DAAT(decodedTermBlocks, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
+  const listHeaders = _.map(terms, (term) => lexicon[term]);
+  openLists(indexFd, listHeaders)
+    .then((listBuffers) => {
+      const lists = [];
+      _.each(listBuffers, (listBuffer, index) => {
+        const listHeader = listHeaders[index];
+        const docIdBlockLength = listHeader[1] - listHeader[0];
+        lists.push({
+          term: terms[index],
+          compressedDocIds: listBuffer.slice(0, docIdBlockLength),
+          compressedFreqs: listBuffer.slice(docIdBlockLength),
+          numberOfDocIds: listHeader[3],
+          compressedFreqsPointer: 0,
+          numberOfDocIdsRead: 0,
+          numberOfFreqsRead: 0,
+          lastReadDocId: 0,
+          lastReadFreq: 0,
+          compressedDocIdPointer: 0,
+        });
+      });
+      //  const results = DAAT(lists, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
+      const results = conjuctive(lists, pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
       console.log(results);
       const snippets = [];
       _.each(results, (result) => {
@@ -253,9 +299,10 @@ const start = () => {
     .then(([lexicon, { pageTable, avgLengthOfDocInCollection, totalNumberOfDocsInCollection }, indexFd]) => {
       console.log('accepting queries now');
       const stdin = process.openStdin();
-      stdin.addListener('data', (d) => {
-        processQuery(d.toString().trim().toLowerCase(), lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
+      stdin.addListener('data', (query) => {
+        processQuery(query.toString().trim().toLowerCase(), lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
       });
+      // processQuery('mua kim', lexicon, pageTable, indexFd, avgLengthOfDocInCollection, totalNumberOfDocsInCollection);
     });
 };
 

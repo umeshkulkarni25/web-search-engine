@@ -15,7 +15,7 @@ const start = async () => {
   if (BUILD_INDEX === 'true') {
     // await batchProcessor.start();
     // await sorter.start();
-    await merger.start();
+    // await merger.start();
     queryProcessor.start();
   } else {
     queryProcessor.start();
